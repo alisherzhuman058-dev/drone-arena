@@ -113,16 +113,19 @@ const view = $('view');
 const vctx = view.getContext('2d');
 
 // Маленькая копия кадра для быстрой обработки
-const SW = 160, SH = 120;
+const SW = 320, SH = 240;
 const small = document.createElement('canvas');
 small.width = SW; small.height = SH;
 const sctx = small.getContext('2d', { willReadFrequently: true });
 
 const STORE_KEY = 'droneArena_v1';
 const GAME_SECONDS = 120;
-const DIFF = 28;        // насколько должна измениться яркость пикселя (0–255), чтобы считаться «дроном»
-const MIN_PIX = 5;     // минимум изменившихся пикселей, иначе это шум
-const MAX_FRAC = 0.5;   // если изменилась почти вся зона — это свет или тень, а не дрон
+const DEBUG = false;   // true — показать найденные пятна (для настройки)
+const DIFF = 28;       // насколько должна измениться яркость пикселя (0–255)
+const MIN_BLOB = 4;    // минимальный размер пятна в пикселях, меньше — шум
+const MAX_BLOB_FRAC = 0.06; // пятно больше 6% зоны — это свет или человек, а не дрон
+const TRACK_GATE = 0.10;    // насколько далеко дрон может сместиться за кадр (доля кадра)
+const CONFIRM = 3;          // сколько раз подряд пятно должно появиться, чтобы стать дроном
 const HOLD_MS = 800;    // сколько держать последнюю позицию дрона, если он на время пропал
 const GATE_COOLDOWN = 1500;
 const OBST_COOLDOWN = 1500;
@@ -136,6 +139,9 @@ const state = {
   drone: null,          // текущая позиция дрона [x, y] в долях кадра
   prevDrone: null,      // позиция на предыдущей проверке
   lastSeen: 0,          // когда дрон последний раз был найден
+  track: null,          // трекер дрона: позиция, скорость, время последней находки
+  candidate: null,      // пятно, которое ещё подтверждается
+  lastCands: [],        // все найденные пятна (для отладки)
   score: 0, gatesPassed: 0, hits: 0, endTime: 0,
   soundOn: true, frameNo: 0, videoReady: false, countdownText: ''
 };
@@ -294,6 +300,8 @@ function stopAll() {
   state.bg = null;
   state.drone = null;
   state.prevDrone = null;
+  state.track = null;
+  state.candidate = null;
   sampling = null;
 }
 
@@ -399,43 +407,98 @@ function finishSampling() {
   toast('Поле запомнено');
 }
 
-// Ищем область, которая отличается от запомненного фона внутри зоны
-function detect(g) {
-  const s = state, m = s.mask, bg = s.bg;
-  const changed = new Uint8Array(SW * SH);
-  let n = 0, sx = 0, sy = 0;
-  for (let i = 0; i < m.length; i++) {
-    if (m[i] && Math.abs(g[i] - bg[i]) > DIFF) {
-      changed[i] = 1;
-      n++;
-      sx += i % SW;
-      sy += Math.floor(i / SW);
+// Находит все связанные группы изменившихся пикселей (пятна)
+function blobs(changed) {
+  const seen = new Uint8Array(SW * SH), out = [], stack = new Int32Array(SW * SH);
+  for (let i = 0; i < changed.length; i++) {
+    if (!changed[i] || seen[i]) continue;
+    let sp = 0, area = 0, sx = 0, sy = 0;
+    let minx = SW, maxx = 0, miny = SH, maxy = 0;
+    stack[sp++] = i; seen[i] = 1;
+    while (sp) {
+      const k = stack[--sp], x = k % SW, y = (k / SW) | 0;
+      area++; sx += x; sy += y;
+      if (x < minx) minx = x; if (x > maxx) maxx = x;
+      if (y < miny) miny = y; if (y > maxy) maxy = y;
+      if (x > 0)      { const n = k - 1;  if (changed[n] && !seen[n]) { seen[n] = 1; stack[sp++] = n; } }
+      if (x < SW - 1) { const n = k + 1;  if (changed[n] && !seen[n]) { seen[n] = 1; stack[sp++] = n; } }
+      if (y > 0)      { const n = k - SW; if (changed[n] && !seen[n]) { seen[n] = 1; stack[sp++] = n; } }
+      if (y < SH - 1) { const n = k + SW; if (changed[n] && !seen[n]) { seen[n] = 1; stack[sp++] = n; } }
     }
+    out.push({ x: sx / area, y: sy / area, area, w: maxx - minx + 1, h: maxy - miny + 1 });
   }
-  // Медленно подстраиваем фон только там, где ничего не изменилось:
-  // так учитываются смена освещения и автоэкспозиция, а дрон в фон не попадает
-  if (s.phase === 'playing' || s.phase === 'countdown') {
-    for (let i = 0; i < m.length; i++) {
+  return out;
+}
+
+// Ищем пятна, которые отличаются от фона внутри зоны и подходят по размеру
+function detect(g) {
+  const s = state, m = s.mask, bg = s.bg, n = SW * SH;
+  const changed = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (m[i] && Math.abs(g[i] - bg[i]) > DIFF) changed[i] = 1;
+  }
+  // Фон подстраивается только там, где ничего не изменилось (свет, автоэкспозиция)
+  if (state.phase === 'playing' || state.phase === 'countdown') {
+    for (let i = 0; i < n; i++) {
       if (m[i] && !changed[i]) bg[i] += (g[i] - bg[i]) * 0.02;
     }
   }
-  if (n < MIN_PIX || n > s.maskCount * MAX_FRAC) return null;
-  return [(sx / n + 0.5) / SW, (sy / n + 0.5) / SH];
+  const maxArea = s.maskCount * MAX_BLOB_FRAC;
+  return blobs(changed).filter(b =>
+    b.area >= MIN_BLOB && b.area <= maxArea &&
+    Math.max(b.w, b.h) / Math.min(b.w, b.h) <= 4
+  );
 }
 
-// Обновляем позицию дрона: сглаживаем и держим последнюю позицию ненадолго
-function updateDrone(raw) {
-  const s = state, now = Date.now();
-  s.prevDrone = s.drone;
-  if (raw) {
-    const fresh = s.drone && now - s.lastSeen < HOLD_MS;
-    s.drone = fresh
-      ? [s.drone[0] * 0.4 + raw[0] * 0.6, s.drone[1] * 0.4 + raw[1] * 0.6]
-      : raw;
-    s.lastSeen = now;
-  } else if (s.drone && now - s.lastSeen > HOLD_MS) {
-    s.drone = null;
-    s.prevDrone = null;
+// Трекер: ведёт дрон, предсказывая его движение, и подтверждает новые пятна
+function trackStep(cands, now) {
+  const s = state;
+  const pts = cands.map(c => ({ x: c.x / SW, y: c.y / SH, area: c.area }));
+
+  const near = (x, y) => {
+    let best = null, bd = TRACK_GATE;
+    for (const p of pts) {
+      const d = Math.hypot(p.x - x, p.y - y);
+      if (d < bd) { bd = d; best = p; }
+    }
+    return best;
+  };
+
+  if (s.track) {
+    const t = s.track;
+    const px = t.x + t.vx, py = t.y + t.vy;   // предсказанная позиция
+    const m = near(px, py);
+    if (m) {
+      const nx = 0.6 * m.x + 0.4 * px, ny = 0.6 * m.y + 0.4 * py;
+      t.vx = 0.5 * t.vx + 0.5 * (nx - t.x);
+      t.vy = 0.5 * t.vy + 0.5 * (ny - t.y);
+      t.x = nx; t.y = ny;
+      t.seen = now;
+    } else {
+      t.x = px; t.y = py;
+      t.vx *= 0.9; t.vy *= 0.9;
+      if (now - t.seen > HOLD_MS) s.track = null;
+    }
+    return;
+  }
+
+  // Дрона пока нет: ищем пятно, которое держится на одном месте
+  if (s.candidate) {
+    const c = s.candidate, m = near(c.x, c.y);
+    if (m) {
+      c.x = m.x; c.y = m.y; c.n++;
+      if (c.n >= CONFIRM) {
+        s.track = { x: c.x, y: c.y, vx: 0, vy: 0, seen: now };
+        s.candidate = null;
+        return;
+      }
+    } else {
+      s.candidate = null;
+    }
+  }
+  if (!s.candidate && pts.length) {
+    const p = pts.reduce((a, b) => (b.area < a.area ? b : a));
+    s.candidate = { x: p.x, y: p.y, n: 1 };
   }
 }
 
@@ -522,6 +585,10 @@ function drawOverlays() {
     });
   }
 
+  if (DEBUG) {
+    vctx.strokeStyle = '#00e5ff'; vctx.lineWidth = 1;
+    s.lastCands.forEach(c => vctx.strokeRect(c.x / SW * W - 5, c.y / SH * H - 5, 10, 10));
+  }
   if (s.drone && (s.phase === 'playing' || s.phase === 'countdown')) {
     const [x, y] = px(s.drone);
     vctx.beginPath();
@@ -578,7 +645,10 @@ function loop() {
   // Обнаружение не на каждом кадре, а через один — так телефон не тормозит
   if ((s.phase === 'countdown' || s.phase === 'playing') && s.bg && s.frameNo % 2 === 0) {
     if (!s.mask) buildMask();
-    updateDrone(detect(grabGray()));
+    s.prevDrone = s.drone;
+    s.lastCands = detect(grabGray());
+    trackStep(s.lastCands, Date.now());
+    s.drone = s.track ? [s.track.x, s.track.y] : null;
     if (s.phase === 'playing') checkGameEvents();
   }
 
@@ -704,6 +774,7 @@ function beginGame() {
   const s = state;
   s.score = 0; s.gatesPassed = 0; s.hits = 0;
   s.drone = null; s.prevDrone = null; s.lastSeen = 0;
+  s.track = null; s.candidate = null;
   gateStates = s.gates.map(() => ({ cool: 0 }));
   obstStates = s.obstacles.map(() => ({ cool: 0 }));
   s.endTime = Date.now() + GAME_SECONDS * 1000;
@@ -717,6 +788,8 @@ function endGame(byTime) {
   stopMelody();
   state.drone = null;
   state.prevDrone = null;
+  state.track = null;
+  state.candidate = null;
   beep(523, 0.4, 'sine', 0.2);
   setTimeout(() => beep(392, 0.6, 'sine', 0.2), 300);
   setPhase('over');
