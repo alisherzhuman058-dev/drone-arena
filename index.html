@@ -120,9 +120,9 @@ const sctx = small.getContext('2d', { willReadFrequently: true });
 
 const STORE_KEY = 'droneArena_v1';
 const GAME_SECONDS = 120;
-const DIFF = 35;        // насколько должна измениться яркость пикселя (0–255), чтобы считаться «дроном»
-const MIN_PIX = 12;     // минимум изменившихся пикселей, иначе это шум
-const MAX_FRAC = 0.4;   // если изменилась почти вся зона — это свет или тень, а не дрон
+const DIFF = 28;        // насколько должна измениться яркость пикселя (0–255), чтобы считаться «дроном»
+const MIN_PIX = 5;     // минимум изменившихся пикселей, иначе это шум
+const MAX_FRAC = 0.5;   // если изменилась почти вся зона — это свет или тень, а не дрон
 const HOLD_MS = 800;    // сколько держать последнюю позицию дрона, если он на время пропал
 const GATE_COOLDOWN = 1500;
 const OBST_COOLDOWN = 1500;
@@ -401,16 +401,25 @@ function finishSampling() {
 
 // Ищем область, которая отличается от запомненного фона внутри зоны
 function detect(g) {
-  const m = state.mask, bg = state.bg;
+  const s = state, m = s.mask, bg = s.bg;
+  const changed = new Uint8Array(SW * SH);
   let n = 0, sx = 0, sy = 0;
   for (let i = 0; i < m.length; i++) {
     if (m[i] && Math.abs(g[i] - bg[i]) > DIFF) {
+      changed[i] = 1;
       n++;
       sx += i % SW;
       sy += Math.floor(i / SW);
     }
   }
-  if (n < MIN_PIX || n > state.maskCount * MAX_FRAC) return null;
+  // Медленно подстраиваем фон только там, где ничего не изменилось:
+  // так учитываются смена освещения и автоэкспозиция, а дрон в фон не попадает
+  if (s.phase === 'playing' || s.phase === 'countdown') {
+    for (let i = 0; i < m.length; i++) {
+      if (m[i] && !changed[i]) bg[i] += (g[i] - bg[i]) * 0.02;
+    }
+  }
+  if (n < MIN_PIX || n > s.maskCount * MAX_FRAC) return null;
   return [(sx / n + 0.5) / SW, (sy / n + 0.5) / SH];
 }
 
@@ -539,7 +548,7 @@ function updateStats() {
   const s = state, el = $('stats');
   if (s.phase === 'playing') {
     const left = Math.max(0, Math.ceil((s.endTime - Date.now()) / 1000));
-    el.textContent = `Очки: ${s.score}   Время: ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+    el.textContent = `Очки: ${s.score}   Время: ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}   Дрон: ${s.drone ? 'есть' : 'нет'}`;
   } else if (s.phase === 'over') {
     el.textContent = `Очки: ${s.score}`;
   } else {
