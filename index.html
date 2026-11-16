@@ -121,6 +121,10 @@ const sctx = small.getContext('2d', { willReadFrequently: true });
 
 const STORE_KEY = 'droneArena_v1';
 const GAME_SECONDS = 120;
+const OBST_COLORS = ['#ff5a6a', '#ff9f1c', '#3b82f6', '#a855f7', '#f472b6', '#22d3ee'];
+const HUE_TOL = 18;     // допуск по оттенку цвета дрона, в градусах
+const SAT_MIN = 0.25;   // минимальная насыщенность пикселя, чтобы считаться цветным
+const VAL_TOL = 0.3;    // допуск по яркости
 const DEBUG = false;   // true — показать найденные пятна (для настройки)
 const DIFF = 28;       // насколько должна измениться яркость пикселя (0–255)
 const MIN_BLOB = 3;    // минимальный размер пятна в пикселях, меньше — шум
@@ -145,6 +149,7 @@ const state = {
   track: null,          // трекер дрона: позиция, скорость, время последней находки
   candidate: null,      // пятно, которое ещё подтверждается
   lastCands: [],        // все найденные пятна (для отладки)
+  target: null,         // цвет дрона: {h, v} — оттенок и яркость, запомненные тапом
   debug: DEBUG,         // режим отладки (кнопка «Отладка»)
   fx: [], texts: [], trail: [], shake: 0, greenUntil: 0, redUntil: 0,
   score: 0, gatesPassed: 0, hits: 0, endTime: 0,
@@ -238,7 +243,7 @@ function saveCalib() {
   state.mask = null; // зона могла измениться — пересчитаем маску
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify({
-      zone: state.zone, gates: state.gates, obstacles: state.obstacles
+      zone: state.zone, gates: state.gates, obstacles: state.obstacles, target: state.target
     }));
   } catch (e) {
     showError('Не удалось сохранить разметку на телефоне. Игра работает, но при следующем запуске придётся размечать заново.');
@@ -252,6 +257,7 @@ function loadCalib() {
       state.zone = d.zone;
       state.gates = d.gates || [];
       state.obstacles = d.obstacles || [];
+      state.target = d.target || null;
     }
   } catch (e) {
     // Сохранённые данные повреждены — начнём разметку заново
@@ -412,7 +418,7 @@ function finishSampling() {
   state.bg = bg;
   state.mask = null;
   clearError();
-  setPhase('ready');
+  setPhase('sample');
   toast('Поле запомнено');
 }
 
@@ -439,17 +445,51 @@ function blobs(changed) {
   return out;
 }
 
-// Ищем пятна, которые отличаются от фона внутри зоны и подходят по размеру
-function detect(g) {
-  const s = state, m = s.mask, bg = s.bg, n = SW * SH;
+// RGB (0–255) -> HSV: оттенок в градусах, насыщенность и яркость от 0 до 1
+function rgb2hsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 0;
+  if (d) {
+    if (mx === r) h = ((g - b) / d) % 6;
+    else if (mx === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  return [h, mx ? d / mx : 0, mx];
+}
+
+// Цветной кадр (RGBA) маленькой копии
+function grabRGB() {
+  sctx.drawImage(video, 0, 0, SW, SH);
+  return sctx.getImageData(0, 0, SW, SH).data;
+}
+
+// Ищем пятна внутри зоны: по цвету дрона, а если он не запомнен — по отличию от фона
+function detect(d) {
+  const s = state, m = s.mask, bg = s.bg, n = SW * SH, t = s.target;
   const changed = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
-    if (m[i] && Math.abs(g[i] - bg[i]) > DIFF) changed[i] = 1;
+    if (!m[i]) continue;
+    const r = d[4 * i], g = d[4 * i + 1], b = d[4 * i + 2];
+    if (t) {
+      const [h, sat, v] = rgb2hsv(r, g, b);
+      let dh = Math.abs(h - t.h);
+      dh = Math.min(dh, 360 - dh);
+      if (sat >= SAT_MIN && dh <= HUE_TOL && Math.abs(v - t.v) <= VAL_TOL) changed[i] = 1;
+    } else {
+      const gray = r * 0.299 + g * 0.587 + b * 0.114;
+      if (Math.abs(gray - bg[i]) > DIFF) changed[i] = 1;
+    }
   }
-  // Фон подстраивается только там, где ничего не изменилось (свет, автоэкспозиция)
-  if (state.phase === 'playing' || state.phase === 'countdown') {
+  // Фон подстраивается только в режиме без цвета и только там, где ничего не изменилось
+  if (!t && (s.phase === 'playing' || s.phase === 'countdown')) {
     for (let i = 0; i < n; i++) {
-      if (m[i] && !changed[i]) bg[i] += (g[i] - bg[i]) * 0.02;
+      if (m[i] && !changed[i]) {
+        const gray = d[4 * i] * 0.299 + d[4 * i + 1] * 0.587 + d[4 * i + 2] * 0.114;
+        bg[i] += (gray - bg[i]) * 0.02;
+      }
     }
   }
   const maxArea = s.maskCount * MAX_BLOB_FRAC;
@@ -457,6 +497,29 @@ function detect(g) {
     b.area >= MIN_BLOB && b.area <= maxArea &&
     Math.max(b.w, b.h) / Math.min(b.w, b.h) <= 4
   );
+}
+
+// Запоминаем цвет дрона из 5×5 пикселей вокруг места тапа
+function sampleAt(p) {
+  const d = grabRGB();
+  const cx = Math.round(p[0] * (SW - 1)), cy = Math.round(p[1] * (SH - 1));
+  let r = 0, g = 0, b = 0, c = 0;
+  for (let dy = -2; dy <= 2; dy++) {
+    for (let dx = -2; dx <= 2; dx++) {
+      const x = cx + dx, y = cy + dy;
+      if (x < 0 || y < 0 || x >= SW || y >= SH) continue;
+      const k = (y * SW + x) * 4;
+      r += d[k]; g += d[k + 1]; b += d[k + 2]; c++;
+    }
+  }
+  const [h, sat, v] = rgb2hsv(r / c, g / c, b / c);
+  if (sat < 0.15) {
+    showError('Этот участок серый или белый. Тапните по цветной части дрона или выберите «Без цвета».');
+    return false;
+  }
+  state.target = { h, v };
+  clearError();
+  return true;
 }
 
 // Трекер: ведёт дрон, предсказывая его движение, и подтверждает новые пятна
@@ -506,7 +569,9 @@ function trackStep(cands, now) {
     }
   }
   if (!s.candidate && pts.length) {
-    const p = pts.reduce((a, b) => (b.area < a.area ? b : a));
+    const p = s.target
+      ? pts.reduce((a, b) => (b.area > a.area ? b : a))
+      : pts.reduce((a, b) => (b.area < a.area ? b : a));
     s.candidate = { x: p.x, y: p.y, n: 1 };
   }
 }
@@ -573,8 +638,9 @@ function checkGameEvents() {
       s.hits++;
       s.score -= 5;
       const x = o[0] * W, y = o[1] * H;
-      burst(x, y, '#ff5a6a', 35);
-      floatText('−5', x, y - 30, '#ff5a6a');
+      const col = OBST_COLORS[i % OBST_COLORS.length];
+      burst(x, y, col, 35);
+      floatText('−5', x, y - 30, col);
       s.redUntil = now + 300;
       s.shake = 16;
       beep(220, 0.3, 'square', 0.2);
@@ -605,13 +671,14 @@ function drawOverlays() {
   if (s.zone.length === 4) poly(s.zone, '#facc15', 'rgba(250,204,21,0.12)');
   s.gates.forEach(g => poly(g, '#22c55e', 'rgba(34,197,94,0.15)'));
 
-  s.obstacles.forEach(o => {
+  s.obstacles.forEach((o, i) => {
     const [x, y] = px(o);
+    const col = OBST_COLORS[i % OBST_COLORS.length];
     vctx.beginPath();
     vctx.arc(x, y, OBST_R * H, 0, Math.PI * 2);
-    vctx.fillStyle = 'rgba(239,68,68,0.35)';
+    vctx.fillStyle = col + '59';
     vctx.fill();
-    vctx.strokeStyle = '#ef4444';
+    vctx.strokeStyle = col;
     vctx.lineWidth = 3;
     vctx.stroke();
   });
@@ -773,10 +840,10 @@ function loop() {
   }
 
   // Обнаружение не на каждом кадре, а через один — так телефон не тормозит
-  if ((s.phase === 'countdown' || s.phase === 'playing') && s.bg && s.frameNo % 2 === 0) {
+  if ((s.phase === 'countdown' || s.phase === 'playing' || s.phase === 'sample') && s.bg && s.frameNo % 2 === 0) {
     if (!s.mask) buildMask();
     s.prevDrone = s.drone;
-    s.lastCands = detect(grabGray());
+    s.lastCands = detect(grabRGB());
     trackStep(s.lastCands, Date.now());
     s.drone = s.track ? [s.track.x, s.track.y] : null;
     if (s.drone) {
@@ -837,8 +904,15 @@ function renderPanel() {
       break;
     case 'ready':
       h = 'Поле готово. Подготовьте дрон и нажмите СТАРТ. Будет обратный отсчёт 5-4-3-2-1.';
-      b = B('start', 'СТАРТ') + B('toBg', 'Запомнить заново', 'sec') +
+      b = B('start', 'СТАРТ') + B('toBg', 'Запомнить заново', 'sec') + B('toSample', 'Цвет дрона', 'sec') +
           B('rezone', 'Перенастроить', 'sec') + B('menu', 'В меню', 'sec');
+      break;
+    case 'sample':
+      h = s.target
+        ? 'Цвет дрона запомнен. Тапните по дрону ещё раз, чтобы выбрать заново, или нажмите «Дальше».'
+        : 'Поставьте дрон в зону полёта и тапните по его цветной части. Программа запомнит цвет.';
+      b = B('skipSample', 'Без цвета (по движению)', 'sec') + B('rezone', 'Перенастроить', 'sec') +
+          (s.target ? B('toReady', 'Дальше') : '') + B('menu', 'В меню', 'sec');
       break;
     case 'countdown':
       h = 'Приготовьтесь!';
@@ -976,13 +1050,16 @@ $('btns').addEventListener('click', e => {
   switch (act) {
     case 'undo': undo(); break;
     case 'reset':
-      state.zone = []; state.gates = []; state.obstacles = [];
+      state.zone = []; state.gates = []; state.obstacles = []; state.target = null;
       saveCalib();
       setPhase('zone');
       break;
     case 'next': nextStep(); break;
     case 'rezone': setPhase('zone'); break;
     case 'toBg': setPhase('bg'); break;
+    case 'toSample': setPhase('sample'); break;
+    case 'toReady': setPhase('ready'); break;
+    case 'skipSample': state.target = null; saveCalib(); setPhase('ready'); break;
     case 'bgCapture': startBgCapture(); break;
     case 'start':
     case 'again': runCountdown(); break;
@@ -1019,6 +1096,13 @@ view.addEventListener('click', e => {
   } else if (s.phase === 'obstacles') {
     s.obstacles.push(p);
     saveCalib();
+  } else if (s.phase === 'sample') {
+    if (sampleAt(p)) {
+      saveCalib();
+      toast('Цвет дрона запомнен');
+      setPhase('ready');
+    }
+    return;
   } else {
     return;
   }
