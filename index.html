@@ -90,6 +90,7 @@
 <header>
   <h1>Drone Arena</h1>
   <div id="stats"></div>
+  <button id="dbgBtn" class="sec small">Отладка</button>
   <button id="soundBtn" class="sec small">Звук: вкл</button>
   <button id="menuBtn" class="sec small">Меню</button>
 </header>
@@ -122,15 +123,17 @@ const STORE_KEY = 'droneArena_v1';
 const GAME_SECONDS = 120;
 const DEBUG = false;   // true — показать найденные пятна (для настройки)
 const DIFF = 28;       // насколько должна измениться яркость пикселя (0–255)
-const MIN_BLOB = 4;    // минимальный размер пятна в пикселях, меньше — шум
+const MIN_BLOB = 3;    // минимальный размер пятна в пикселях, меньше — шум
 const MAX_BLOB_FRAC = 0.06; // пятно больше 6% зоны — это свет или человек, а не дрон
 const TRACK_GATE = 0.10;    // насколько далеко дрон может сместиться за кадр (доля кадра)
-const CONFIRM = 3;          // сколько раз подряд пятно должно появиться, чтобы стать дроном
+const CONFIRM = 2;          // сколько раз подряд пятно должно появиться, чтобы стать дроном
 const HOLD_MS = 800;    // сколько держать последнюю позицию дрона, если он на время пропал
 const GATE_COOLDOWN = 1500;
 const OBST_COOLDOWN = 1500;
 const OBST_R = 0.05;    // радиус препятствия в долях высоты кадра
-const MELODY = [523, 587, 659, 784, 659, 587, 523, 440];
+// Оригинальная игровая тема (собственная мелодия, не из чужих песен)
+const BASS = [110, 110, 130.8, 110, 146.8, 146.8, 123.5, 110, 98, 98, 110, 98, 130.8, 130.8, 123.5, 110];
+const LEAD = [440, 0, 523.3, 659.3, 0, 587.3, 523.3, 0, 392, 0, 440, 523.3, 0, 493.9, 440, 0];
 
 const state = {
   phase: 'menu',        // menu, zone, gates, obstacles, bg, ready, countdown, playing, over
@@ -142,6 +145,8 @@ const state = {
   track: null,          // трекер дрона: позиция, скорость, время последней находки
   candidate: null,      // пятно, которое ещё подтверждается
   lastCands: [],        // все найденные пятна (для отладки)
+  debug: DEBUG,         // режим отладки (кнопка «Отладка»)
+  fx: [], texts: [], trail: [], shake: 0, greenUntil: 0, redUntil: 0,
   score: 0, gatesPassed: 0, hits: 0, endTime: 0,
   soundOn: true, frameNo: 0, videoReady: false, countdownText: ''
 };
@@ -209,7 +214,11 @@ function beep(freq, dur, type = 'sine', vol = 0.15) {
 function startMelody() {
   stopMelody();
   let i = 0;
-  melodyTimer = setInterval(() => beep(MELODY[i++ % MELODY.length], 0.3, 'triangle', 0.04), 400);
+  melodyTimer = setInterval(() => {
+    const k = i++ % 16;
+    beep(BASS[k], 0.22, 'triangle', 0.14);
+    if (LEAD[k]) beep(LEAD[k], 0.18, 'square', 0.045);
+  }, 210);
 }
 
 function stopMelody() {
@@ -509,29 +518,65 @@ function addScore(n, msg) {
   toast(msg);
 }
 
+// Частицы, всплывающие надписи и вспышки
+function burst(x, y, color, n) {
+  const s = state;
+  if (s.fx.length > 300) return;
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, sp = 2 + Math.random() * 6;
+    s.fx.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 2,
+                life: 1, color, size: 3 + Math.random() * 4 });
+  }
+}
+
+function floatText(text, x, y, color) {
+  state.texts.push({ text, x, y, color, t0: performance.now() });
+}
+
+function polyCenter(q) {
+  let sx = 0, sy = 0;
+  q.forEach(p => { sx += p[0]; sy += p[1]; });
+  return [sx / q.length * view.width, sy / q.length * view.height];
+}
+
 // Очки начисляются сразу, когда путь дрона пересёк ворота или прошёл близко к препятствию
 function checkGameEvents() {
   const s = state, cur = s.drone, prev = s.prevDrone || cur, now = Date.now();
   if (!cur) return;
+  const W = view.width, H = view.height;
 
   s.gates.forEach((g, i) => {
     const gs = gateStates[i];
     if (now < gs.cool) return;
     if (segHitPoly(prev, cur, g)) {
       gs.cool = now + GATE_COOLDOWN;
+      gs.flash = now + 500;
       s.gatesPassed++;
-      addScore(10, 'Ворота ' + (i + 1) + ' +10');
+      s.score += 10;
+      const [cx, cy] = polyCenter(g);
+      burst(cx, cy, '#35e0a1', 45);
+      burst(cur[0] * W, cur[1] * H, '#ffffff', 12);
+      floatText('+10', cx, cy, '#35e0a1');
+      s.greenUntil = now + 350;
+      s.shake = 4;
       beep(880, 0.25);
+      beep(1320, 0.3, 'sine', 0.12);
     }
   });
 
   s.obstacles.forEach((o, i) => {
     const os = obstStates[i];
     if (now < os.cool) return;
-    if (segDistPx(o, prev, cur, view.width, view.height) < OBST_R * view.height) {
+    if (segDistPx(o, prev, cur, W, H) < OBST_R * H) {
       os.cool = now + OBST_COOLDOWN;
+      os.flash = now + 400;
       s.hits++;
-      addScore(-5, 'Касание −5');
+      s.score -= 5;
+      const x = o[0] * W, y = o[1] * H;
+      burst(x, y, '#ff5a6a', 35);
+      floatText('−5', x, y - 30, '#ff5a6a');
+      s.redUntil = now + 300;
+      s.shake = 16;
       beep(220, 0.3, 'square', 0.2);
     }
   });
@@ -585,7 +630,7 @@ function drawOverlays() {
     });
   }
 
-  if (DEBUG) {
+  if (s.debug) {
     vctx.strokeStyle = '#00e5ff'; vctx.lineWidth = 1;
     s.lastCands.forEach(c => vctx.strokeRect(c.x / SW * W - 5, c.y / SH * H - 5, 10, 10));
   }
@@ -611,6 +656,87 @@ function drawOverlays() {
   }
 }
 
+// Все визуальные эффекты: след, свечение дрона, частицы, надписи, вспышки
+function drawFx() {
+  const s = state, W = view.width, H = view.height, now = performance.now();
+  const inGame = s.phase === 'playing' || s.phase === 'countdown';
+
+  if (now < s.greenUntil) { vctx.fillStyle = 'rgba(53,224,161,0.18)'; vctx.fillRect(0, 0, W, H); }
+  if (now < s.redUntil)   { vctx.fillStyle = 'rgba(255,60,80,0.22)'; vctx.fillRect(0, 0, W, H); }
+
+  // Яркая обводка ворот и препятствий в момент события
+  s.gates.forEach((g, i) => {
+    const f = gateStates[i] && gateStates[i].flash;
+    if (!f || now > f) return;
+    vctx.beginPath();
+    g.forEach((p, k) => k ? vctx.lineTo(p[0] * W, p[1] * H) : vctx.moveTo(p[0] * W, p[1] * H));
+    vctx.closePath();
+    vctx.strokeStyle = '#ffffff'; vctx.lineWidth = 8; vctx.stroke();
+  });
+  s.obstacles.forEach((o, i) => {
+    const f = obstStates[i] && obstStates[i].flash;
+    if (!f || now > f) return;
+    vctx.beginPath();
+    vctx.arc(o[0] * W, o[1] * H, OBST_R * H * 1.4, 0, Math.PI * 2);
+    vctx.strokeStyle = '#ffffff'; vctx.lineWidth = 6; vctx.stroke();
+  });
+
+  // След дрона
+  if (inGame && s.trail.length > 1) {
+    s.trail.forEach((p, i) => {
+      const a = (i + 1) / s.trail.length;
+      vctx.beginPath();
+      vctx.arc(p[0] * W, p[1] * H, 3 + a * 6, 0, Math.PI * 2);
+      vctx.fillStyle = 'rgba(53,224,161,' + (a * 0.5) + ')';
+      vctx.fill();
+    });
+  }
+
+  // Заметный дрон: пульсирующее кольцо и прицел
+  if (inGame && s.drone) {
+    const x = s.drone[0] * W, y = s.drone[1] * H;
+    const r = H * 0.035 + Math.sin(now / 120) * 3;
+    vctx.beginPath(); vctx.arc(x, y, r + 9, 0, Math.PI * 2);
+    vctx.strokeStyle = 'rgba(53,224,161,0.35)'; vctx.lineWidth = 6; vctx.stroke();
+    vctx.beginPath(); vctx.arc(x, y, r, 0, Math.PI * 2);
+    vctx.strokeStyle = '#35e0a1'; vctx.lineWidth = 3; vctx.stroke();
+    vctx.beginPath();
+    vctx.moveTo(x - r - 16, y); vctx.lineTo(x - r + 3, y);
+    vctx.moveTo(x + r - 3, y);  vctx.lineTo(x + r + 16, y);
+    vctx.moveTo(x, y - r - 16); vctx.lineTo(x, y - r + 3);
+    vctx.moveTo(x, y + r - 3);  vctx.lineTo(x, y + r + 16);
+    vctx.stroke();
+  }
+
+  // Частицы
+  s.fx = s.fx.filter(p => p.life > 0);
+  s.fx.forEach(p => {
+    p.x += p.vx; p.y += p.vy; p.vy += 0.25; p.life -= 0.025;
+    vctx.globalAlpha = Math.max(0, p.life);
+    vctx.fillStyle = p.color;
+    vctx.beginPath();
+    vctx.arc(p.x, p.y, p.size * p.life + 1, 0, Math.PI * 2);
+    vctx.fill();
+  });
+  vctx.globalAlpha = 1;
+
+  // Всплывающие надписи +10 и −5
+  s.texts = s.texts.filter(t => now - t.t0 < 1200);
+  s.texts.forEach(t => {
+    const a = (now - t.t0) / 1200;
+    vctx.globalAlpha = 1 - a;
+    vctx.font = 'bold ' + (H * 0.09) + 'px system-ui';
+    vctx.textAlign = 'center';
+    vctx.lineWidth = H * 0.012;
+    vctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    vctx.strokeText(t.text, t.x, t.y - a * 80);
+    vctx.fillStyle = t.color;
+    vctx.fillText(t.text, t.x, t.y - a * 80);
+  });
+  vctx.globalAlpha = 1;
+  vctx.textAlign = 'left';
+}
+
 function updateStats() {
   const s = state, el = $('stats');
   if (s.phase === 'playing') {
@@ -631,7 +757,11 @@ function loop() {
   updateStats();
 
   if (!s.videoReady || video.readyState < 2) return;
-  vctx.drawImage(video, 0, 0, view.width, view.height);
+  const sk = s.shake;
+  s.shake *= 0.85;
+  const ox = sk > 0.5 ? (Math.random() - 0.5) * sk * 2 : 0;
+  const oy = sk > 0.5 ? (Math.random() - 0.5) * sk * 2 : 0;
+  vctx.drawImage(video, ox, oy, view.width, view.height);
   s.frameNo++;
 
   if (sampling && s.phase === 'bg') {
@@ -649,10 +779,15 @@ function loop() {
     s.lastCands = detect(grabGray());
     trackStep(s.lastCands, Date.now());
     s.drone = s.track ? [s.track.x, s.track.y] : null;
+    if (s.drone) {
+      s.trail.push(s.drone.slice());
+      if (s.trail.length > 14) s.trail.shift();
+    }
     if (s.phase === 'playing') checkGameEvents();
   }
 
   drawOverlays();
+  drawFx();
 }
 
 /* ---------- Фазы и панель управления ---------- */
@@ -775,8 +910,9 @@ function beginGame() {
   s.score = 0; s.gatesPassed = 0; s.hits = 0;
   s.drone = null; s.prevDrone = null; s.lastSeen = 0;
   s.track = null; s.candidate = null;
-  gateStates = s.gates.map(() => ({ cool: 0 }));
-  obstStates = s.obstacles.map(() => ({ cool: 0 }));
+  s.fx = []; s.texts = []; s.trail = []; s.shake = 0; s.greenUntil = 0; s.redUntil = 0;
+  gateStates = s.gates.map(() => ({ cool: 0, flash: 0 }));
+  obstStates = s.obstacles.map(() => ({ cool: 0, flash: 0 }));
   s.endTime = Date.now() + GAME_SECONDS * 1000;
   if (!s.mask) buildMask();
   setPhase('playing');
@@ -827,6 +963,10 @@ $('fileInput').onchange = e => {
   afterSource();
 };
 
+$('dbgBtn').onclick = () => {
+  state.debug = !state.debug;
+  $('dbgBtn').textContent = state.debug ? 'Отладка: вкл' : 'Отладка';
+};
 $('soundBtn').onclick = toggleSound;
 $('menuBtn').onclick = goMenu;
 
