@@ -107,6 +107,7 @@
   <div id="btns" class="row"></div>
 </div>
 
+<audio id="bgm" src="music.mp3" loop preload="auto"></audio>
 <script>
 const $ = id => document.getElementById(id);
 const video = $('video');
@@ -216,7 +217,7 @@ function beep(freq, dur, type = 'sine', vol = 0.15) {
   o.start(); o.stop(ctx.currentTime + dur);
 }
 
-function startMelody() {
+function startSynth() {
   stopMelody();
   let i = 0;
   melodyTimer = setInterval(() => {
@@ -229,12 +230,30 @@ function startMelody() {
 function stopMelody() {
   clearInterval(melodyTimer);
   melodyTimer = null;
+  const bgm = $('bgm');
+  if (bgm) bgm.pause();
+}
+
+// Основная музыка: файл music.mp3 из репозитория. Если файла нет — синтезатор
+function startMelody() {
+  stopMelody();
+  const bgm = $('bgm');
+  if (!bgm) { startSynth(); return; }
+  bgm.currentTime = 0;
+  bgm.volume = 0.5;
+  bgm.play().catch(() => startSynth());
 }
 
 function toggleSound() {
   state.soundOn = !state.soundOn;
   $('soundBtn').textContent = state.soundOn ? 'Звук: вкл' : 'Звук: выкл';
-  if (state.soundOn) getAudio();
+  if (state.soundOn) {
+    getAudio();
+    if (state.phase === 'playing') startMelody();
+  } else {
+    const b = $('bgm');
+    if (b) b.pause();
+  }
 }
 
 /* ---------- Сохранение разметки ---------- */
@@ -957,6 +976,8 @@ function nextStep() {
 /* ---------- Игра ---------- */
 
 function runCountdown() {
+  const bgmU = $('bgm');
+  if (bgmU) bgmU.play().then(() => bgmU.pause()).catch(() => {});
   if (!state.bg) {
     showError('Сначала запомните поле: нажмите «Запомнить поле».');
     return;
