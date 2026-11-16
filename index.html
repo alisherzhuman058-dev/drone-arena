@@ -135,7 +135,7 @@ function begin() {
   mode = 'zone';
   try {
     const s = JSON.parse(localStorage.da);
-    if (s && s.Z && s.Z.length == 4 && confirm('Использовать сохранённую калибровку?')) {
+    if (s && s.Z && s.Z.length == 4) {
       Z = s.Z; G = s.G; O = s.O; mask(); mode = 'bg';
     }
   } catch (e) {}
@@ -196,6 +196,7 @@ $('#b2').onclick = () => {
 $('#b3').onclick = () => {
   Z = []; G = []; O = []; cur = []; bg = null; pos = null;
   mode = 'zone'; music(false); ui();
+  try { localStorage.removeItem('da'); } catch (e) {}
 };
 
 $('#mu').onclick = () => {
