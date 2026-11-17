@@ -84,6 +84,10 @@
   <div id="menuError" class="err"></div>
   <button id="btnCam">Камера</button>
   <button id="btnFile" class="sec">Видео из файла</button>
+  <button id="btnBgMusic" class="sec">Фоновая музыка с устройства</button>
+  <button id="btnGameMusic" class="sec">Музыка игры с устройства</button>
+  <input type="file" id="bgInput" accept="audio/*" style="display:none">
+  <input type="file" id="gameInput" accept="audio/*" style="display:none">
   <input type="file" id="fileInput" accept="video/*" style="display:none">
 </div>
 
@@ -107,7 +111,6 @@
   <div id="btns" class="row"></div>
 </div>
 
-<audio id="bgm" src="music.mp3" loop preload="auto"></audio>
 <script>
 const $ = id => document.getElementById(id);
 const video = $('video');
@@ -227,21 +230,34 @@ function startSynth() {
   }, 210);
 }
 
+/* ---------- Музыка ---------- */
+const bgTrack = new Audio('background_music.mp3');   // фоновая: в меню и между играми
+bgTrack.loop = true; bgTrack.volume = 0.35;
+const gameTrack = new Audio('music.mp3');            // основная: во время игры
+gameTrack.loop = true; gameTrack.volume = 0.5;
+
+// Фон играет вне игры. Браузер разрешает звук только после нажатия на экран
+function playBg() {
+  if (!state.soundOn) return;
+  if (state.phase === 'playing' || state.phase === 'countdown') return;
+  if (!bgTrack.paused) return;
+  bgTrack.play().catch(() => {});
+}
+document.addEventListener('pointerdown', playBg);
+
 function stopMelody() {
   clearInterval(melodyTimer);
   melodyTimer = null;
-  const bgm = $('bgm');
-  if (bgm) bgm.pause();
+  gameTrack.pause();
 }
 
-// Основная музыка: файл music.mp3 из репозитория. Если файла нет — синтезатор
+// Основная музыка во время игры; если файла нет — встроенная мелодия
 function startMelody() {
   stopMelody();
-  const bgm = $('bgm');
-  if (!bgm) { startSynth(); return; }
-  bgm.currentTime = 0;
-  bgm.volume = 0.5;
-  bgm.play().catch(() => startSynth());
+  bgTrack.pause();
+  if (!state.soundOn) return;
+  gameTrack.currentTime = 0;
+  gameTrack.play().catch(() => startSynth());
 }
 
 function toggleSound() {
@@ -249,10 +265,10 @@ function toggleSound() {
   $('soundBtn').textContent = state.soundOn ? 'Звук: вкл' : 'Звук: выкл';
   if (state.soundOn) {
     getAudio();
-    if (state.phase === 'playing') startMelody();
+    if (state.phase === 'playing') startMelody(); else playBg();
   } else {
-    const b = $('bgm');
-    if (b) b.pause();
+    bgTrack.pause();
+    gameTrack.pause();
   }
 }
 
@@ -976,8 +992,8 @@ function nextStep() {
 /* ---------- Игра ---------- */
 
 function runCountdown() {
-  const bgmU = $('bgm');
-  if (bgmU) bgmU.play().then(() => bgmU.pause()).catch(() => {});
+  bgTrack.pause();
+  gameTrack.play().then(() => gameTrack.pause()).catch(() => {});
   if (!state.bg) {
     showError('Сначала запомните поле: нажмите «Запомнить поле».');
     return;
@@ -1024,6 +1040,7 @@ function endGame(byTime) {
   beep(523, 0.4, 'sine', 0.2);
   setTimeout(() => beep(392, 0.6, 'sine', 0.2), 300);
   setPhase('over');
+  playBg();
   toast(byTime ? 'Время вышло!' : 'Игра остановлена');
 }
 
@@ -1031,6 +1048,7 @@ function endGame(byTime) {
 
 function goMenu() {
   stopAll();
+  playBg();
   state.phase = 'menu';
   $('menu').style.display = 'flex';
   renderPanel();
@@ -1061,6 +1079,23 @@ $('fileInput').onchange = e => {
 $('dbgBtn').onclick = () => {
   state.debug = !state.debug;
   $('dbgBtn').textContent = state.debug ? 'Отладка: вкл' : 'Отладка';
+};
+$('btnBgMusic').onclick = () => $('bgInput').click();
+$('btnGameMusic').onclick = () => $('gameInput').click();
+$('bgInput').onchange = e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  bgTrack.src = URL.createObjectURL(f);
+  bgTrack.load();
+  toast('Фон: ' + f.name);
+  playBg();
+};
+$('gameInput').onchange = e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  gameTrack.src = URL.createObjectURL(f);
+  gameTrack.load();
+  toast('Музыка игры: ' + f.name);
 };
 $('soundBtn').onclick = toggleSound;
 $('menuBtn').onclick = goMenu;
