@@ -894,15 +894,6 @@ function loop() {
   if (s.phase === 'playing' && Date.now() >= s.endTime) endGame(true);
   updateStats();
 
-  // Сторожевой таймер: если камера перестала давать новые кадры, переподключаем
-  if (s.camMode && video.getVideoPlaybackQuality && !s.restarting) {
-    const q = video.getVideoPlaybackQuality().totalVideoFrames;
-    if (typeof q === 'number') {
-      if (q !== s.lastQ) { s.lastQ = q; s.lastQAt = Date.now(); }
-      else if (Date.now() - s.lastQAt > 2500) { s.lastQAt = Date.now(); restartCamera(); }
-    }
-  }
-
   if (!s.videoReady || video.readyState < 2) return;
   const sk = s.shake;
   s.shake *= 0.85;
@@ -1212,6 +1203,13 @@ view.addEventListener('click', e => {
 });
 
 /* ---------- Запуск ---------- */
+
+// Раз в 3 секунды проверяем, жив ли поток камеры; переподключаем только если он оборвался
+setInterval(() => {
+  if (!state.camMode || !stream || state.restarting) return;
+  const t = stream.getVideoTracks()[0];
+  if (!t || t.readyState !== 'live') restartCamera();
+}, 3000);
 
 loadCalib();
 renderPanel();
