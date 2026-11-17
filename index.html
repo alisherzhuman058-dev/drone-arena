@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Drone Arena</title>
 <style>
   :root {
@@ -73,6 +75,21 @@
   #menu p { color: var(--muted); text-align: center; margin: 0; max-width: 320px; line-height: 1.45; }
   #menu .err { width: 100%; max-width: 320px; }
   #menu button { width: 100%; max-width: 320px; flex: none; font-size: 18px; padding: 16px; }
+  #side { display: contents; }
+  header { order: 0; }
+  #stage { order: 1; }
+  #panel { order: 2; }
+  @media (orientation: landscape) {
+    body { flex-direction: row; }
+    #stage { flex: 1; order: 0; min-width: 0; }
+    #side { display: flex; flex-direction: column; width: 240px; flex: none; border-left: 1px solid var(--line); }
+    header { border-bottom: 1px solid var(--line); padding: 8px 10px; padding-top: calc(8px + env(safe-area-inset-top, 0px)); gap: 6px; }
+    header h1 { font-size: 14px; }
+    #stats { font-size: 13px; }
+    #panel { flex: 1; overflow-y: auto; border-top: none; padding: 8px; order: 0; }
+    #hint { font-size: 13px; min-height: 0; margin-bottom: 8px; }
+    #panel button { min-width: 0; padding: 10px 6px; font-size: 14px; flex: 1 1 45%; }
+  }
 </style>
 </head>
 <body>
@@ -91,6 +108,15 @@
   <input type="file" id="fileInput" accept="video/*" style="display:none">
 </div>
 
+
+
+
+</div>
+<div id="stage">
+  <video id="video" playsinline muted></video>
+  <canvas id="view" width="640" height="480"></canvas>
+  <div id="toast"></div>
+<div id="side">
 <header>
   <h1>Drone Arena</h1>
   <div id="stats"></div>
@@ -98,17 +124,11 @@
   <button id="soundBtn" class="sec small">Звук: вкл</button>
   <button id="menuBtn" class="sec small">Меню</button>
 </header>
-
-<div id="stage">
-  <video id="video" playsinline muted></video>
-  <canvas id="view" width="640" height="480"></canvas>
-  <div id="toast"></div>
-</div>
-
 <div id="panel">
   <div id="error" class="err"></div>
   <p id="hint"></p>
   <div id="btns" class="row"></div>
+</div>
 </div>
 
 <script>
