@@ -174,6 +174,8 @@ const state = {
   candidate: null,      // пятно, которое ещё подтверждается
   lastCands: [],        // все найденные пятна (для отладки)
   target: null,         // цвет дрона: {h, v} — оттенок и яркость, запомненные тапом
+  camMode: false,       // true — работает живая камера (не видеофайл)
+  lastQ: -1, lastQAt: 0, restarting: false,
   debug: DEBUG,         // режим отладки (кнопка «Отладка»)
   fx: [], texts: [], trail: [], shake: 0, greenUntil: 0, redUntil: 0,
   score: 0, gatesPassed: 0, hits: 0, endTime: 0,
@@ -346,6 +348,8 @@ async function startCamera() {
     return false;
   }
   video.srcObject = stream;
+  const vt = stream.getVideoTracks()[0];
+  if (vt) vt.addEventListener('ended', () => restartCamera());
   try {
     await video.play();
   } catch (e) {
@@ -354,6 +358,18 @@ async function startCamera() {
     return false;
   }
   return true;
+}
+
+// Переподключает камеру, не сбрасывая разметку и фон
+async function restartCamera() {
+  if (state.restarting) return;
+  state.restarting = true;
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null;
+  video.srcObject = null;
+  const ok = await startCamera();
+  state.restarting = false;
+  if (ok) { state.lastQAt = Date.now(); toast('Камера переподключена'); }
 }
 
 function stopAll() {
@@ -878,6 +894,15 @@ function loop() {
   if (s.phase === 'playing' && Date.now() >= s.endTime) endGame(true);
   updateStats();
 
+  // Сторожевой таймер: если камера перестала давать новые кадры, переподключаем
+  if (s.camMode && video.getVideoPlaybackQuality && !s.restarting) {
+    const q = video.getVideoPlaybackQuality().totalVideoFrames;
+    if (typeof q === 'number') {
+      if (q !== s.lastQ) { s.lastQ = q; s.lastQAt = Date.now(); }
+      else if (Date.now() - s.lastQAt > 2500) { s.lastQAt = Date.now(); restartCamera(); }
+    }
+  }
+
   if (!s.videoReady || video.readyState < 2) return;
   const sk = s.shake;
   s.shake *= 0.85;
@@ -1075,7 +1100,7 @@ function goMenu() {
 }
 
 $('btnCam').onclick = async () => {
-  if (await startCamera()) afterSource();
+  if (await startCamera()) { state.camMode = true; afterSource(); }
 };
 
 $('btnFile').onclick = () => {
@@ -1088,6 +1113,7 @@ $('fileInput').onchange = e => {
   const f = e.target.files[0];
   if (!f) return;
   clearError();
+  state.camMode = false;
   stopAll();
   video.src = URL.createObjectURL(f);
   video.loop = true;
